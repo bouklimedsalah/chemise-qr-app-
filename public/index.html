@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Suivi des chemises</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #F7F7F5; color: #2C2C2A; margin: 0; }
+  header { background: #1F3864; color: #fff; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  header h1 { font-size: 16px; font-weight: 500; margin: 0; }
+  button { cursor: pointer; font-size: 13px; font-weight: 500; border-radius: 6px; padding: 8px 14px; border: none; }
+  .btn-light { background: #fff; color: #1F3864; }
+  .btn-navy { background: #1F3864; color: #fff; }
+  .btn-teal { background: #0F6E56; color: #fff; }
+  .btn-blue { background: #185FA5; color: #fff; }
+  .btn-amber { background: #854F0B; color: #fff; }
+  .btn-outline { background: #fff; color: #5F5E5A; border: 1px solid #E3E1D8; }
+  main { padding: 18px; max-width: 720px; margin: 0 auto; }
+  input, select { border: 1px solid #E3E1D8; border-radius: 6px; padding: 8px 10px; font-size: 13px; width: 100%; box-sizing: border-box; }
+  label { font-size: 12px; color: #5F5E5A; display: block; margin-bottom: 4px; }
+  .field { margin-bottom: 10px; }
+  .card { background: #fff; border: 1px solid #E3E1D8; border-radius: 8px; padding: 12px 16px; margin-bottom: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .badge { font-size: 12px; font-weight: 500; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .search-bar { display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid #E3E1D8; border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; max-width: 420px; }
+  .search-bar input { border: none; outline: none; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
+  .modal { background: #fff; border-radius: 10px; padding: 20px; width: 420px; max-height: 85vh; overflow-y: auto; }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .close { cursor: pointer; font-size: 18px; color: #888780; }
+  .roster-chip { background: #F1EFE8; border-radius: 999px; padding: 4px 8px 4px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; margin: 0 6px 6px 0; }
+  .hist-line { font-size: 12px; display: flex; justify-content: space-between; border-bottom: 1px solid #F1EFE8; padding: 5px 0; }
+  #reader { width: 100%; max-width: 360px; margin: 0 auto 10px; }
+  .notice { background: #E1F5EE; color: #0F6E56; font-size: 13px; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+  .error-text { color: #A32D2D; font-size: 13px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📁 Suivi des chemises</h1>
+  <div style="display:flex; gap:8px;">
+    <button class="btn-light" onclick="openScanner()">📷 Scanner un QR</button>
+    <button class="btn-light" onclick="openCreate()">+ Nouvelle chemise</button>
+  </div>
+</header>
+
+<main>
+  <div id="notice"></div>
+  <div id="error" class="error-text"></div>
+
+  <div class="search-bar">
+    🔎 <input id="search" placeholder="Où est la chemise ? (référence, client, contrat…)" oninput="loadList()" />
+  </div>
+
+  <div id="list"></div>
+</main>
+
+<div id="modal-root"></div>
+
+<script>
+const API = "/api";
+let currentDossier = null;
+let scanner = null;
+
+async function api(path, opts) {
+  const res = await fetch(API + path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "Erreur serveur.");
+  return body;
+}
+
+function showError(msg) {
+  document.getElementById("error").textContent = msg || "";
+}
+function showNotice(msg) {
+  const el = document.getElementById("notice");
+  el.innerHTML = msg ? `<div class="notice">${msg}</div>` : "";
+  if (msg) setTimeout(() => (el.innerHTML = ""), 3500);
+}
+
+function badgeFor(d) {
+  if (d.statut === "en_transit") return { bg: "#FAEEDA", fg: "#854F0B", label: `En transit vers « ${d.cible.destinataire} »` };
+  if (d.statut === "archive") return { bg: "#F1EFE8", fg: "#5F5E5A", label: "Archivé" };
+  const n = (d.operateurs || []).length;
+  return { bg: "#E1F5EE", fg: "#0F6E56", label: `En cours (${n} opérateur${n > 1 ? "s" : ""})` };
+}
+
+async function loadList() {
+  showError("");
+  const q = document.getElementById("search").value;
+  try {
+    const items = await api("/dossiers?q=" + encodeURIComponent(q));
+    const list = document.getElementById("list");
+    if (items.length === 0) {
+      list.innerHTML = `<p style="color:#888780; font-size:14px;">Aucune chemise. Créez-en une ou scannez un QR.</p>`;
+      return;
+    }
+    list.innerHTML = items.map((d) => {
+      const b = badgeFor(d);
+      return `<div class="card" onclick="openDetail('${d.reference}')">
+        <div>
+          <div style="font-size:14px; font-weight:500;">${d.reference} ${d.client ? "— " + d.client : ""}</div>
+          <div style="font-size:12px; color:#888780;">${d.type_prestation || "Type non précisé"}</div>
+        </div>
+        <span class="badge" style="background:${b.bg}; color:${b.fg};">${b.label}</span>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function closeModal() {
+  document.getElementById("modal-root").innerHTML = "";
+  if (scanner) { scanner.stop().catch(() => {}); scanner = null; }
+}
+
+function openCreate(scannedRef) {
+  const fromScan = !!scannedRef;
+  document.getElementById("modal-root").innerHTML = `
+    <div class="modal-bg">
+      <div class="modal">
+        <div class="modal-header"><b>${fromScan ? "Chemise scannée — pas encore enregistrée" : "Nouvelle chemise"}</b><span class="close" onclick="closeModal()">✕</span></div>
+        ${fromScan ? `<p style="font-size:12px; color:#888780;">Ce QR n'existe pas encore dans l'appli. Le scan démarre son suivi — complétez les infos pour l'ouvrir.</p>` : ""}
+        <div class="field"><label>N° de chemise *</label><input id="f-ref" placeholder="ex. 26OT0000" maxlength="8" value="${fromScan ? scannedRef : ""}" ${fromScan ? "readonly" : ""} style="text-transform:uppercase;" /></div>
+        <p style="font-size:11px; color:#A6A49B; margin:-4px 0 8px;">Format : 2 chiffres, 2 lettres, 4 chiffres (ex. 26OT0000)</p>
+        <div class="field"><label>Nom du client</label><input id="f-client" /></div>
+        <div class="field"><label>N° de bon de commande</label><input id="f-bc" /></div>
+        <div class="field"><label>Offre ou contrat</label><input id="f-contrat" /></div>
+        <div class="field"><label>Type de prestation</label><input id="f-type" /></div>
+        <div id="create-error" class="error-text"></div>
+        <button class="btn-navy" style="width:100%;" onclick="submitCreate()">${fromScan ? "Ouvrir la chemise (check-in Service client)" : "Créer (check-in Service client)"}</button>
+      </div>
+    </div>`;
+}
+
+async function submitCreate() {
+  const ref = document.getElementById("f-ref").value.trim().toUpperCase();
+  if (!/^\d{2}[A-Z]{2}\d{4}$/.test(ref)) {
+    document.getElementById("create-error").textContent = "Format invalide — le N° de chemise doit être du type 26OT0000 (2 chiffres, 2 lettres, 4 chiffres).";
+    return;
+  }
+  try {
+    const d = await api("/dossiers", {
+      method: "POST",
+      body: JSON.stringify({
+        reference: ref,
+        client: document.getElementById("f-client").value,
+        numero_bc: document.getElementById("f-bc").value,
+        contrat: document.getElementById("f-contrat").value,
+        type_prestation: document.getElementById("f-type").value,
+      }),
+    });
+    closeModal();
+    showNotice(`Chemise ${d.reference} ouverte.`);
+    loadList();
+    openDetail(d.reference);
+  } catch (e) {
+    document.getElementById("create-error").textContent = e.message;
+  }
+}
+
+function openScanner() {
+  document.getElementById("modal-root").innerHTML = `
+    <div class="modal-bg">
+      <div class="modal">
+        <div class="modal-header"><b>Scanner un QR</b><span class="close" onclick="closeModal()">✕</span></div>
+        <div id="reader"></div>
+        <p style="font-size:12px; color:#888780;">Autorisez la caméra. Le scan ouvre automatiquement la chemise correspondante.</p>
+      </div>
+    </div>`;
+  scanner = new Html5Qrcode("reader");
+  scanner.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: 220 },
+    (decoded) => {
+      const ref = decoded.replace(/^CHEMISE:/i, "").trim();
+      closeModal();
+      openDetail(ref);
+    },
+    () => {}
+  ).catch((e) => {
+    document.getElementById("reader").innerHTML = `<p class="error-text">Caméra indisponible : ${e}</p>`;
+  });
+}
+
+async function openDetail(reference) {
+  showError("");
+  try {
+    const d = await api("/dossiers/" + encodeURIComponent(reference));
+    currentDossier = d;
+    renderDetail(d);
+  } catch (e) {
+    // Chemise inconnue de l'appli : le scan est le point de départ, on propose de l'enregistrer
+    openCreate(reference);
+  }
+}
+
+function renderDetail(d) {
+  const b = badgeFor(d);
+  const rosterHtml = (d.operateurs || []).map((o) =>
+    `<span class="roster-chip">${o} <span style="cursor:pointer;" onclick="leave('${d.reference}','${o}')">✕</span></span>`
+  ).join("") || `<span style="font-size:12px; color:#888780;">Aucun — check-in requis.</span>`;
+
+  const etapeOptions = Array.from({ length: 8 }, (_, i) => `<option value="${i}">${i}. ${etapeName(i)}</option>`).join("");
+
+  const actionHtml = d.statut === "en_transit"
+    ? `<p style="font-size:13px; color:#5F5E5A;">En attente de check-in par <b>${d.cible.destinataire}</b>.</p>
+       <button class="btn-blue" style="width:100%;" onclick="checkin('${d.reference}', '${d.cible.destinataire}')">Check-in de ${d.cible.destinataire}</button>`
+    : `
+      <div style="font-size:12px; font-weight:500; color:#5F5E5A; margin:12px 0 6px;">Opérateurs actifs</div>
+      <div>${rosterHtml}</div>
+      <div style="display:flex; gap:6px; margin:10px 0;">
+        <input id="join-name" placeholder="Nom (check-in)" />
+        <button class="btn-teal" onclick="checkinPrompt('${d.reference}')">Check-in</button>
+      </div>
+      <button class="${d.etapeIdx === 7 ? 'btn-amber' : 'btn-blue'}" style="width:100%;" onclick="openAdvance('${d.reference}')">
+        ${d.etapeIdx === 7 ? "Retirer des archives (check-out)" : "Check-out — envoyer à l'étape suivante"}
+      </button>
+      <div id="advance-form"></div>
+    `;
+
+  document.getElementById("modal-root").innerHTML = `
+    <div class="modal-bg">
+      <div class="modal">
+        <div class="modal-header"><b>${d.reference}</b><span class="close" onclick="closeModal()">✕</span></div>
+        <div style="font-size:12px; color:#888780; margin-bottom:8px;">${d.client || "Client non précisé"} · ${d.type_prestation || "Type non précisé"}</div>
+        <span class="badge" style="background:${b.bg}; color:${b.fg};">${b.label}</span>
+        ${actionHtml}
+        <div style="font-size:12px; font-weight:500; color:#5F5E5A; margin:18px 0 6px;">Historique</div>
+        <div style="max-height:180px; overflow-y:auto;">
+          ${(d.historique || []).slice().reverse().map((m) => `
+            <div class="hist-line">
+              <span>${m.type === "TRANSIT" ? `Étape ${m.etapeIdx} → ${etapeName(m.nextIdx)} (${m.destinataire})` : `${etapeName(m.etapeIdx)} — ${m.utilisateur}`}</span>
+              <span style="color:#888780;">${new Date(m.ts).toLocaleString("fr-FR")}</span>
+            </div>`).join("")}
+        </div>
+      </div>
+    </div>`;
+
+  window._etapeOptionsHtml = etapeOptions;
+}
+
+function etapeName(i) {
+  const noms = ["Service client", "Programmation", "Impression", "Ordre de facturation", "Vérification", "Facturation", "Recouvrement", "Archives"];
+  return noms[i] ?? i;
+}
+
+function checkinPrompt(reference) {
+  const name = document.getElementById("join-name").value;
+  checkin(reference, name);
+}
+
+async function checkin(reference, name) {
+  if (!name || !name.trim()) return;
+  try {
+    await api(`/dossiers/${encodeURIComponent(reference)}/checkin`, { method: "POST", body: JSON.stringify({ utilisateur: name }) });
+    openDetail(reference);
+    loadList();
+  } catch (e) { showError(e.message); }
+}
+
+async function leave(reference, name) {
+  try {
+    await api(`/dossiers/${encodeURIComponent(reference)}/quitter`, { method: "POST", body: JSON.stringify({ utilisateur: name }) });
+    openDetail(reference);
+  } catch (e) { showError(e.message); }
+}
+
+function openAdvance(reference) {
+  const suggested = currentDossier.etapeIdx === 7 ? 0 : Math.min(currentDossier.etapeIdx + 1, 7);
+  document.getElementById("advance-form").innerHTML = `
+    <div style="background:#F7F7F5; border-radius:8px; padding:12px; margin-top:10px;">
+      <label>Étape suivante</label>
+      <select id="adv-etape">${window._etapeOptionsHtml.replace(`value="${suggested}"`, `value="${suggested}" selected`)}</select>
+      <div style="margin-top:8px;"><label>Destinataire</label><input id="adv-dest" placeholder="Nom du destinataire" /></div>
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button class="btn-navy" style="flex:1;" onclick="submitAdvance('${reference}')">Confirmer</button>
+        <button class="btn-outline" onclick="document.getElementById('advance-form').innerHTML=''">Annuler</button>
+      </div>
+    </div>`;
+}
+
+async function submitAdvance(reference) {
+  const nextIdx = document.getElementById("adv-etape").value;
+  const destinataire = document.getElementById("adv-dest").value;
+  if (!destinataire.trim()) return;
+  try {
+    await api(`/dossiers/${encodeURIComponent(reference)}/checkout`, { method: "POST", body: JSON.stringify({ nextIdx, destinataire }) });
+    openDetail(reference);
+    loadList();
+  } catch (e) { showError(e.message); }
+}
+
+loadList();
+</script>
+</body>
+</html>
